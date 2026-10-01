@@ -26,9 +26,16 @@ pub fn run(args: impl Iterator<Item = impl Into<OsString> + Clone>) -> Result<()
       config.subcommand.execute(&config, &loader)
     })
     .map_err(|error| {
+      if let Error::StdoutIo { io_error } = &error
+        && io_error.kind() == io::ErrorKind::BrokenPipe
+      {
+        return EXIT_SUCCESS;
+      }
+
       if !verbosity.quiet() && error.print_message() {
         eprintln!("{}", error.color_display(color.stderr()));
       }
+
       error.code().unwrap_or(EXIT_FAILURE)
     })
 }

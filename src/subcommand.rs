@@ -76,10 +76,7 @@ impl Subcommand {
         Self::changelog();
         return Ok(());
       }
-      Completions { shell } => {
-        Self::completions(*shell);
-        return Ok(());
-      }
+      Completions { shell } => return Self::completions(*shell),
       Init => return Self::init(config),
       Man => return Self::man(),
       Request { request } => return Self::request(request),
@@ -114,13 +111,13 @@ impl Subcommand {
       }
       Clean { path } => Self::clean(config, &search, path.as_ref())?,
       Dump { format } => Self::dump(config, compilation, *format)?,
-      Groups => Self::groups(config, justfile),
+      Groups => Self::groups(config, justfile)?,
       List { path } => Self::list(config, justfile, path)?,
       Run { arguments } => Self::run(config, loader, search, compilation, arguments)?,
       Show { path } => Self::show(config, justfile, path)?,
-      Summary => Self::summary(config, justfile),
+      Summary => Self::summary(config, justfile)?,
       Usage { path } => Self::usage(config, justfile, path)?,
-      Variables => Self::variables(justfile),
+      Variables => Self::variables(justfile)?,
       Changelog | Completions { .. } | Edit | Format | Init | Man | Request { .. } => {
         unreachable!()
       }
@@ -129,11 +126,17 @@ impl Subcommand {
     Ok(())
   }
 
-  fn groups(config: &Config, justfile: &Justfile) {
-    println!("Recipe groups:");
+  fn groups(config: &Config, justfile: &Justfile) -> RunResult<'static> {
+    let mut stdout = io::stdout().lock();
+
+    writeln!(stdout, "Recipe groups:").map_err(|io_error| Error::StdoutIo { io_error })?;
+
     for group in justfile.public_groups(config) {
-      println!("{}{group}", config.list_prefix);
+      writeln!(stdout, "{}{group}", config.list_prefix)
+        .map_err(|io_error| Error::StdoutIo { io_error })?;
     }
+
+    Ok(())
   }
 
   pub(crate) fn name(&self) -> &'static str {
@@ -429,19 +432,24 @@ impl Subcommand {
     Ok(())
   }
 
-  fn completions(shell: Shell) {
-    print!("{}", shell.completion_script());
+  fn completions(shell: Shell) -> RunResult<'static> {
+    write!(io::stdout(), "{}", shell.completion_script())
+      .map_err(|io_error| Error::StdoutIo { io_error })
   }
 
   fn dump(config: &Config, compilation: Compilation, format: DumpFormat) -> RunResult<'static> {
+    let mut stdout = io::stdout().lock();
+
     match format {
       DumpFormat::Json => {
-        serde_json::to_writer(io::stdout(), &compilation.justfile)
+        let json = serde_json::to_string(&compilation.justfile)
           .map_err(|source| Error::DumpJson { source })?;
-        println!();
+
+        writeln!(stdout, "{json}").map_err(|io_error| Error::StdoutIo { io_error })?;
       }
       DumpFormat::Just => {
-        print!(
+        write!(
+          stdout,
           "{}",
           compilation.root_ast().color_display(
             config
@@ -454,7 +462,8 @@ impl Subcommand {
                   .unwrap_or_default()
               )
           )
-        );
+        )
+        .map_err(|io_error| Error::StdoutIo { io_error })?;
       }
     }
     Ok(())
@@ -519,6 +528,8 @@ impl Subcommand {
           .algorithm(similar::Algorithm::Patience)
           .diff_lines(src, &formatted);
 
+        let mut stdout = io::stdout().lock();
+
         for op in diff.ops() {
           for change in diff.iter_changes(op) {
             let (symbol, color) = match change.tag() {
@@ -527,14 +538,20 @@ impl Subcommand {
               ChangeTag::Insert => ("+", config.color.stdout().diff_added()),
             };
 
-            print!("{}{symbol}{change}{}", color.prefix(), color.suffix());
+            write!(
+              stdout,
+              "{}{symbol}{change}{}",
+              color.prefix(),
+              color.suffix()
+            )
+            .map_err(|io_error| Error::StdoutIo { io_error })?;
           }
         }
       }
 
       Err(Error::FormatCheckFoundDiff)
     } else if search.tempdir.is_some() {
-      print!("{formatted}");
+      write!(io::stdout(), "{formatted}").map_err(|io_error| Error::StdoutIo { io_error })?;
       Ok(())
     } else {
       if formatted != src {
@@ -616,19 +633,22 @@ impl Subcommand {
       }
     };
 
-    serde_json::to_writer(io::stdout(), &response).map_err(|source| Error::DumpJson { source })?;
+    let json = serde_json::to_string(&response).map_err(|source| Error::DumpJson { source })?;
+
+    write!(io::stdout(), "{json}").map_err(|io_error| Error::StdoutIo { io_error })?;
 
     Ok(())
   }
 
   fn list<'src>(config: &Config, root: &Justfile<'src>, path: &Modulepath) -> RunResult<'src> {
     let module = Self::resolve_module(root, path, &path.components)?;
-    Self::list_module(config, 0, &config.groups, module)?;
+    Self::list_module(config, &mut io::stdout().lock(), 0, &config.groups, module)?;
     Ok(())
   }
 
   fn list_module(
     config: &Config,
+    stdout: &mut dyn Write,
     depth: usize,
     groups: &[String],
     module: &Justfile,
@@ -637,63 +657,66 @@ impl Subcommand {
 
     fn print_doc_and_aliases(
       config: &Config,
+      stdout: &mut dyn Write,
       name: &str,
       doc: Option<&str>,
       aliases: &[&str],
       max_signature_width: usize,
       signature_widths: &BTreeMap<&str, usize>,
-    ) {
+    ) -> io::Result<()> {
       let color = config.color.stdout();
 
       let inline_aliases = config.alias_style != AliasStyle::Separate && !aliases.is_empty();
 
       if inline_aliases || doc.is_some() {
-        print!(
+        write!(
+          stdout,
           "{:padding$}{}",
           "",
           color.doc().paint("#"),
           padding = max_signature_width.saturating_sub(signature_widths[name]) + 1,
-        );
+        )?;
       }
 
-      let print_aliases = || {
-        print!(
+      let print_aliases = |stdout: &mut dyn Write| -> io::Result<()> {
+        write!(
+          stdout,
           " {}",
           color.alias().paint(&format!(
             "[alias{}: {}]",
             if aliases.len() == 1 { "" } else { "es" },
             aliases.join(", ")
           ))
-        );
+        )
       };
 
       if inline_aliases && config.alias_style == AliasStyle::Left {
-        print_aliases();
+        print_aliases(stdout)?;
       }
 
       if let Some(doc) = doc {
-        print!(" ");
+        write!(stdout, " ")?;
         let mut end = 0;
         for backtick in BACKTICK_RE.find_iter(doc) {
           let prefix = &doc[end..backtick.start()];
           if !prefix.is_empty() {
-            print!("{}", color.doc().paint(prefix));
+            write!(stdout, "{}", color.doc().paint(prefix))?;
           }
-          print!("{}", color.doc_backtick().paint(backtick.as_str()));
+          write!(stdout, "{}", color.doc_backtick().paint(backtick.as_str()))?;
           end = backtick.end();
         }
 
         let suffix = &doc[end..];
         if !suffix.is_empty() {
-          print!("{}", color.doc().paint(suffix));
+          write!(stdout, "{}", color.doc().paint(suffix))?;
         }
       }
 
       if inline_aliases && config.alias_style == AliasStyle::Right {
-        print_aliases();
+        print_aliases(stdout)?;
       }
 
-      println!();
+      writeln!(stdout)
     }
 
     let (aliases, cross_module_aliases) = if config.no_aliases {
@@ -784,7 +807,7 @@ impl Subcommand {
     }
 
     if depth == 0 {
-      print!("{}", config.list_heading);
+      write!(stdout, "{}", config.list_heading).map_err(|io_error| Error::StdoutIo { io_error })?;
     }
 
     let entry_groups = {
@@ -884,14 +907,16 @@ impl Subcommand {
 
     for (i, group) in ordered_groups.into_iter().enumerate() {
       if i > 0 {
-        println!();
+        writeln!(stdout).map_err(|io_error| Error::StdoutIo { io_error })?;
       }
 
       if !no_groups && let Some(group) = &group {
-        println!(
+        writeln!(
+          stdout,
           "{list_prefix}{}",
           config.color.stdout().group().paint(&format!("[{group}]"))
-        );
+        )
+        .map_err(|io_error| Error::StdoutIo { io_error })?;
       }
 
       if let Some(entries) = entry_groups.get(&group) {
@@ -906,31 +931,37 @@ impl Subcommand {
             && !inline_comment
           {
             for line in comment.lines() {
-              println!(
+              writeln!(
+                stdout,
                 "{list_prefix}{} {}",
                 config.color.stdout().doc().paint("#"),
                 config.color.stdout().doc().paint(line),
-              );
+              )
+              .map_err(|io_error| Error::StdoutIo { io_error })?;
             }
           }
 
-          print!(
+          write!(
+            stdout,
             "{list_prefix}{}",
             RecipeSignature {
               name: entry.name,
               recipe: entry.recipe
             }
             .color_display(config.color.stdout())
-          );
+          )
+          .map_err(|io_error| Error::StdoutIo { io_error })?;
 
           print_doc_and_aliases(
             config,
+            stdout,
             entry.name,
             entry.comment.as_deref().filter(|_| inline_comment),
             entry.aliases,
             max_signature_width,
             &signature_widths,
-          );
+          )
+          .map_err(|io_error| Error::StdoutIo { io_error })?;
         }
       }
 
@@ -938,21 +969,25 @@ impl Subcommand {
         for (i, submodule) in submodules.iter().enumerate() {
           if config.list_submodules {
             if no_groups && (i + groups_count > 0) {
-              println!();
+              writeln!(stdout).map_err(|io_error| Error::StdoutIo { io_error })?;
             }
-            println!("{list_prefix}{}:", submodule.name());
+            writeln!(stdout, "{list_prefix}{}:", submodule.name())
+              .map_err(|io_error| Error::StdoutIo { io_error })?;
 
-            Self::list_module(config, depth + 1, &[], submodule)?;
+            Self::list_module(config, stdout, depth + 1, &[], submodule)?;
           } else {
-            print!("{list_prefix}{} ...", submodule.name());
+            write!(stdout, "{list_prefix}{} ...", submodule.name())
+              .map_err(|io_error| Error::StdoutIo { io_error })?;
             print_doc_and_aliases(
               config,
+              stdout,
               submodule.name(),
               submodule.doc.as_deref(),
               &[],
               max_signature_width,
               &signature_widths,
-            );
+            )
+            .map_err(|io_error| Error::StdoutIo { io_error })?;
           }
         }
       }
@@ -964,39 +999,49 @@ impl Subcommand {
   fn show<'src>(config: &Config, module: &Justfile<'src>, path: &Modulepath) -> RunResult<'src> {
     let (alias, recipe) = Self::resolve_path(module, path, "show")?;
 
+    let mut stdout = io::stdout().lock();
+
+    let context = |io_error| Error::StdoutIo { io_error };
+
     if let Some(alias) = alias {
-      println!("{alias}");
+      writeln!(stdout, "{alias}").map_err(context)?;
     }
 
     if !recipe.attributes.contains(AttributeKind::Doc)
       && let Some(doc) = &recipe.doc
     {
-      println!("# {doc}");
+      writeln!(stdout, "# {doc}").map_err(context)?;
     }
 
     for attribute in &recipe.attributes {
-      println!("[{attribute}]");
+      writeln!(stdout, "[{attribute}]").map_err(context)?;
     }
 
-    println!("{}", recipe.color_display(config.color.stdout()));
+    writeln!(stdout, "{}", recipe.color_display(config.color.stdout())).map_err(context)?;
 
     Ok(())
   }
 
-  fn summary(config: &Config, justfile: &Justfile) {
+  fn summary(config: &Config, justfile: &Justfile) -> RunResult<'static> {
     let recipes = justfile.public_recipes_recursive(config);
+
+    let mut stdout = io::stdout().lock();
+
+    let context = |io_error| Error::StdoutIo { io_error };
 
     for (i, recipe) in recipes.iter().enumerate() {
       if i > 0 {
-        print!(" ");
+        write!(stdout, " ").map_err(context)?;
       }
-      print!("{}", recipe.recipe_path());
+      write!(stdout, "{}", recipe.recipe_path()).map_err(context)?;
     }
-    println!();
+    writeln!(stdout).map_err(context)?;
 
     if recipes.is_empty() && config.verbosity.loud() {
       eprintln!("justfile contains no recipes");
     }
+
+    Ok(())
   }
 
   pub(crate) fn takes_arguments(&self) -> bool {
@@ -1024,6 +1069,10 @@ impl Subcommand {
   }
 
   fn usage<'src>(config: &Config, root: &Justfile<'src>, path: &Modulepath) -> RunResult<'src> {
+    let mut stdout = io::stdout().lock();
+
+    let context = |io_error| Error::StdoutIo { io_error };
+
     if let Some(module) = root.submodule(path) {
       let recipes = module.public_recipes(config);
 
@@ -1032,10 +1081,15 @@ impl Subcommand {
           eprintln!("module contains no recipes");
         }
       } else {
-        println!("{}", config.color.stdout().heading().paint("Usage:"));
+        writeln!(
+          stdout,
+          "{}",
+          config.color.stdout().heading().paint("Usage:")
+        )
+        .map_err(context)?;
         for (i, recipe) in recipes.into_iter().enumerate() {
           if i > 0 {
-            println!();
+            writeln!(stdout).map_err(context)?;
           }
 
           let path = Modulepath {
@@ -1043,7 +1097,8 @@ impl Subcommand {
             ..path.join(recipe.name())
           };
 
-          println!(
+          writeln!(
+            stdout,
             "{}",
             Usage {
               mode: usage::Mode::Module,
@@ -1051,17 +1106,19 @@ impl Subcommand {
               recipe,
             }
             .color_display(config.color.stdout()),
-          );
+          )
+          .map_err(context)?;
         }
       }
     } else {
       let (alias, recipe) = Self::resolve_path(root, path, "usage")?;
 
       if let Some(alias) = alias {
-        println!("{alias}");
+        writeln!(stdout, "{alias}").map_err(context)?;
       }
 
-      println!(
+      writeln!(
+        stdout,
         "{}",
         Usage {
           mode: usage::Mode::Recipe,
@@ -1069,7 +1126,8 @@ impl Subcommand {
           recipe
         }
         .color_display(config.color.stdout()),
-      );
+      )
+      .map_err(context)?;
     }
 
     Ok(())
@@ -1139,7 +1197,11 @@ impl Subcommand {
     }
   }
 
-  fn variables(justfile: &Justfile) {
+  fn variables(justfile: &Justfile) -> RunResult<'static> {
+    let mut stdout = io::stdout().lock();
+
+    let context = |io_error| Error::StdoutIo { io_error };
+
     for (i, (_, assignment)) in justfile
       .assignments
       .iter()
@@ -1147,11 +1209,13 @@ impl Subcommand {
       .enumerate()
     {
       if i > 0 {
-        print!(" ");
+        write!(stdout, " ").map_err(context)?;
       }
-      print!("{}", assignment.name);
+      write!(stdout, "{}", assignment.name).map_err(context)?;
     }
-    println!();
+    writeln!(stdout).map_err(context)?;
+
+    Ok(())
   }
 }
 

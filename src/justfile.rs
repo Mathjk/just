@@ -343,8 +343,12 @@ impl<'src> Justfile<'src> {
 
         let scope = scopes.get(&module.module_path).unwrap().1;
 
+        let mut stdout = io::stdout().lock();
+
+        let context = |io_error| Error::StdoutIo { io_error };
+
         if let Some(assignment) = variable {
-          print!("{}", scope.value(assignment.number).unwrap().join());
+          write!(stdout, "{}", scope.value(assignment.number).unwrap().join()).map_err(context)?;
         } else {
           let mut bindings = scope
             .bindings()
@@ -360,25 +364,28 @@ impl<'src> Justfile<'src> {
           for binding in bindings {
             match format {
               EvaluateFormat::Just => {
-                println!(
+                writeln!(
+                  stdout,
                   "{0:1$} := {2}",
                   binding.name,
                   width,
                   binding.value.color_display(config.color.stdout()),
-                );
+                )
+                .map_err(context)?;
               }
               EvaluateFormat::Shell => {
                 if binding.export || module.settings.export {
-                  print!("export ");
+                  write!(stdout, "export ").map_err(context)?;
                 }
-                print!("{}=\"", binding.name.lexeme().replace('-', "_"));
+                write!(stdout, "{}=\"", binding.name.lexeme().replace('-', "_"))
+                  .map_err(context)?;
                 for c in binding.value.join().chars() {
                   if matches!(c, '!' | '"' | '$' | '\\' | '`') {
-                    print!("\\");
+                    write!(stdout, "\\").map_err(context)?;
                   }
-                  print!("{c}");
+                  write!(stdout, "{c}").map_err(context)?;
                 }
-                println!("\"");
+                writeln!(stdout, "\"").map_err(context)?;
               }
             }
           }

@@ -150,7 +150,7 @@ pub(crate) use {
   clap::{CommandFactory, FromArgMatches, Parser as _, ValueEnum},
   clap_complete::{ArgValueCompleter, CompletionCandidate, PathCompleter, engine::ValueCompleter},
   digest_io::HashWriter,
-  libc::EXIT_FAILURE,
+  libc::{EXIT_FAILURE, EXIT_SUCCESS},
   rand::seq::IndexedRandom,
   regex::Regex,
   serde::{

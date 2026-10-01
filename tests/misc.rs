@@ -2809,3 +2809,42 @@ fn alias_listing_cross_module_does_not_annotate_same_named_recipe() {
     )
     .success();
 }
+
+#[test]
+fn stdout_broken_pipe() {
+  let tempdir = tempdir();
+
+  fs::write(tempdir.path().join("justfile"), "x := 'y'\n\nfoo:\n").unwrap();
+
+  for args in [
+    vec!["--summary"],
+    vec!["--list"],
+    vec!["--dump"],
+    vec!["--evaluate"],
+    vec!["--variables"],
+    vec!["--groups"],
+    vec!["--usage"],
+    vec!["--show", "foo"],
+    vec!["--completions", "bash"],
+  ] {
+    let (reader, writer) = std::io::pipe().unwrap();
+
+    drop(reader);
+
+    let output = Command::new(JUST)
+      .args(&args)
+      .current_dir(tempdir.path())
+      .stdin(Stdio::null())
+      .stdout(writer)
+      .output()
+      .unwrap();
+
+    assert!(
+      output.status.success(),
+      "`just {}` failed with {}: {}",
+      args.join(" "),
+      output.status,
+      String::from_utf8_lossy(&output.stderr),
+    );
+  }
+}
